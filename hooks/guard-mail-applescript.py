@@ -12,6 +12,8 @@
 # files run by osascript (also <file, $(cat file), $VAR, cd in the same command, the session folder),
 # a script piped into osascript (also cat file |), a here-string (<<<), timeout, nice, export and sh -c in front of
 # it, and in the code_snippet, code, script or source of AppleScript tools.
+# Also blocks a Mail script that sends (send, «event emsgsend»): a send goes only through mail_send, after the
+# user's approval in the chat (hooks/guard-mail-send.py).
 # Gap: osascript started from a Python or Node file is not seen. Test: hooks/test-guard-mail.sh
 # Every heredoc with such an AppleScript counts as a script, even when it only writes a file.
 # Exit 2 = block (stderr goes to the model). Exit 0 = allow. Unreadable input = allow.
@@ -30,6 +32,7 @@ SEPARATORS = {";", "&", "&&", "|", "||", "(", ")", "\n"}
 WRAPPERS = {"sudo", "time", "nohup", "nice", "env", "export", "exec", "command", "then", "do", "else", "{"}
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 REDIRECTS = {">", ">>", ">&", "<&", "&>", ">|"}
+SEND = re.compile(r'''\bsend\b|emsgsend''', re.I)
 
 REASON = (
     "STOP: this AppleScript reads Apple Mail through collections (whose / where / messages / mailboxes / a range / "
@@ -40,6 +43,8 @@ REASON = (
     "Allowed here: a draft (make new outgoing message), a script that touches only the Drafts or Outbox mailbox, "
     'and one message by its id from a ref: «class mssg» id N of mailbox "X" of account id "Y".'
 )
+SEND_REASON = ("STOP: this script sends mail through Apple Mail. Mail goes out only through "
+               "mcp__apple-mail__mail_send, after the user approved the draft in the chat.")
 
 
 def code(script, keep_strings=False):
@@ -65,6 +70,10 @@ def reads_collections(script):
     if not (COLLECTION.search(k) or LOOP_BY_INDEX.search(k)):
         return False
     return not drafts_only(script)
+
+
+def sends(script):
+    return bool(MAIL.search(script)) and bool(SEND.search(code(script)))
 
 
 def scripts_in(cmd, cwd, depth=0):
@@ -168,6 +177,9 @@ def main():
     # Bash and terminals pass a command; AppleScript tools pass the script itself under one of these names
     scripts = scripts_in(inp["command"], d.get("cwd")) if isinstance(inp.get("command"), str) else []
     scripts += [v for k, v in inp.items() if k in ("code_snippet", "code", "script", "source") and isinstance(v, str)]
+    if any(sends(s) for s in scripts if s):
+        print(SEND_REASON, file=sys.stderr)
+        return 2
     if any(reads_collections(s) for s in scripts if s):
         print(REASON, file=sys.stderr)
         return 2

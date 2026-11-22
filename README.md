@@ -105,9 +105,11 @@ Writing:
 - When Mail keeps the window open, does not answer in time, quits or reports an error after the send, the
   answer says the result is unknown. The server never sends that draft again and tells the model not to make
   a new one for it. Check the window, Outbox and Sent in Mail.
-- The real guard against a misled model is your client. Keep per-call approval on for `mail_send`,
-  or keep sending manual: in Claude Code add `"mcp__apple-mail__mail_send"` to `permissions.deny`
-  in `settings.json`, let the model prepare drafts, and press Send in Mail yourself.
+- The real guard against a misled model is outside the model. Keep per-call approval on for `mail_send`.
+  If you run Claude Code without approvals, use the send hook (see Optional hooks), which lets a send
+  through only after your own approval in the chat. It stops a model that sends too early, not one that
+  works against you. For a hard stop on `mail_send`, keep sending manual: add `"mcp__apple-mail__mail_send"` to
+  `permissions.deny` in `settings.json`, let the model prepare drafts, and press Send in Mail yourself.
 - There is no permanent delete. `mail_trash` is an explicit move to the account's Trash mailbox.
   Mail's own delete follows the account settings, and on Gmail it erased a draft for good in testing.
 - Files you ask for (`save_to`, `save_dir`) are written only inside the save folder, `~/Downloads`
@@ -165,22 +167,9 @@ On the first call macOS asks whether the app that runs the server (your terminal
 client) may control Mail. Allow it. You can change it later in System Settings > Privacy & Security >
 Automation.
 
-## Optional hook for Claude Code
+## Optional hooks for Claude Code
 
-When a tool feels limited, a model likes to write its own AppleScript against Mail, and that is exactly
-the kind of script that freezes it. `hooks/guard-mail-applescript.py` is a PreToolUse hook that blocks
-such scripts and points the model back to these tools.
-
-It blocks reading Mail through collections: `whose`, `where`, `messages`, `mailboxes`, ranges like
-`message 1 thru N`, `«class mssg»` without an id, and loops over `message i of`. It allows drafts,
-accounts, the selection, one message by id, and scripts that touch only Drafts or Outbox. Words inside
-quoted strings and comments, like a subject or the text of a draft, do not count.
-
-It reads the script wherever osascript gets it in a Bash command: heredocs, here-strings, one or several
-`-e`, a `$VARIABLE` set in the same command, a script file, a script piped in, and osascript behind
-`timeout`, `nice` or `sh -c`. It also checks the code of AppleScript tools.
-
-Add it to `~/.claude/settings.json`:
+Two PreToolUse hooks. Add both to `~/.claude/settings.json`:
 
 ```json
 {
@@ -189,11 +178,39 @@ Add it to `~/.claude/settings.json`:
       {
         "matcher": "Bash|mcp__applescript-mcp__applescript_execute|mcp__terminal__run_in_terminal",
         "hooks": [{"type": "command", "command": "python3 ~/apple-mail-mcp/hooks/guard-mail-applescript.py"}]
+      },
+      {
+        "matcher": "mcp__apple-mail__mail_send",
+        "hooks": [{"type": "command", "command": "python3 ~/apple-mail-mcp/hooks/guard-mail-send.py",
+                   "onFailure": "block"}]
       }
     ]
   }
 }
 ```
+
+Claude Code 2.1 picked up changes to these hooks in running sessions, without a restart.
+`"onFailure": "block"` (Claude Code 2.1.295 or newer) makes the send hook block also when it cannot
+start, times out or crashes. The scripts hook runs on every Bash command, so it goes without it: a broken
+path there would stop them all.
+
+### Mail scripts
+
+When a tool feels limited, a model likes to write its own AppleScript against Mail, and that is exactly
+the kind of script that freezes it. `hooks/guard-mail-applescript.py` blocks such scripts and points
+the model back to these tools.
+
+It blocks reading Mail through collections: `whose`, `where`, `messages`, `mailboxes`, ranges like
+`message 1 thru N`, `«class mssg»` without an id, and loops over `message i of`. It allows drafts,
+accounts, the selection, one message by id, and scripts that touch only Drafts or Outbox. Words inside
+quoted strings and comments, like a subject or the text of a draft, do not count.
+
+It also blocks a Mail script that sends (`send` or `«event emsgsend»`), so a send cannot skip the
+approval below.
+
+It reads the script wherever osascript gets it in a Bash command: heredocs, here-strings, one or several
+`-e`, a `$VARIABLE` set in the same command, a script file, a script piped in, and osascript behind
+`timeout`, `nice` or `sh -c`. It also checks the code of AppleScript tools.
 
 The matcher names a Bash tool and two AppleScript-capable tools. Add the names of the tools you use.
 The hook reads `code_snippet` for `mcp__applescript-mcp__applescript_execute` and `command` for the rest.
@@ -203,6 +220,44 @@ Test: `hooks/test-guard-mail.sh` should end with `RESULT: green`.
 
 The hook catches mistakes, not deliberate workarounds. For example, it does not see osascript
 started from inside a Python or Node file.
+
+### Approval before mail_send
+
+`hooks/guard-mail-send.py` reads the conversation file that Claude Code passes to hooks. It lets
+`mail_send` through only when:
+
+- the call comes from the main conversation, not from a subagent,
+- the draft is the one the latest `mail_draft` call in this conversation made,
+- your last message came after that draft, holds nothing but approval words like "send", "yes", "tak"
+  or "wyślij", and has no question mark,
+- no other `mail_send` was called since that message. One approval covers one send.
+
+So drafts go one at a time: draft, approval, send. For an older draft, the model makes it again, or you
+press Send in Mail. Anything else blocks the call and tells the model to show the draft and ask. The hook blocks instead of
+asking, so it also works when approvals are skipped. Your messages are the ones Claude Code marks as typed
+by you. Notes Claude Code adds to them, like `<system-reminder>`, are left out. A message you type while
+the model is working never approves. Claude Code files it after the result of the tool that was running,
+so it can look newer than a draft you have not seen yet. It only cancels an earlier approval. Background
+tasks, system notes, the summary after compaction, subagents and prompts from scripts never count. Add your
+language to `APPROVE` in the file.
+
+Claude Code writes a call to the conversation file only after its hooks ran. So the hook also marks each
+used approval with an empty file in `~/Library/Caches/apple-mail-mcp/approvals`, which stops two calls in
+one message from sharing it.
+
+It cannot tell what a bare "yes" answered. A "yes" to any question, sent after the draft was made, unlocks
+one send. So the model should ask "Send it?" right after showing the draft. Keep only words like "send" in
+`APPROVE` if a plain "yes" is too loose for you.
+
+It stops a model that sends too early, not one that works against you. A model with Bash can edit the
+conversation file or the hook itself. `permissions.deny` stops `mail_send` for sure, but not a script
+that drives Mail on its own, like osascript started from a Python file.
+
+It depends on the layout of Claude Code's conversation file, tested with Claude Code 2.1. When it cannot
+find the draft and your approval there, or fails in any other way, it blocks the send.
+
+Test: `hooks/test-guard-mail-send.py` should end with `RESULT: green`, and with `HOOK=/usr/bin/true`
+it should end with `RESULT: RED`.
 
 ## Limits
 
@@ -239,6 +294,8 @@ started from inside a Python or Node file.
 The server talks only to Mail, through Apple Events, and makes no network calls of its own.
 After a send it brings back the app you were in with `open`.
 What the model reads goes to your model provider like the rest of the conversation.
+The send hook reads the conversation file on your disk, keeps an empty file for each used approval in
+`~/Library/Caches/apple-mail-mcp/approvals`, and sends nothing anywhere.
 Copies of attachments for a forward live in `~/Library/Caches/apple-mail-mcp/forward`.
 The server removes the ones older than 7 days when it starts.
 

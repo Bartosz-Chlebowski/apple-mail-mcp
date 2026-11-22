@@ -200,4 +200,14 @@ run 2 Bash "set -e
 osascript -e 'tell application \"Mail\" to count messages of inbox'"
 run 2 Bash "cd /tmp;
 osascript -e 'tell application \"Mail\" to count messages of inbox'"
+# sending through Mail would skip the approval before mail_send -> blocked;
+# send in a string or a comment, sender, another app -> allowed
+run 2 $A "tell application \"Mail\" to send (make new outgoing message with properties {subject:\"x\", visible:true})"
+run 2 Bash "osascript -e 'tell application \"Mail\"' -e 'send front outgoing message' -e 'end tell'"
+run 2 Bash "osascript -l JavaScript -e 'Application(\"Mail\").outgoingMessages()[0].send()'"
+run 2 $A "tell application \"Mail\" to «event emsgsend» (front outgoing message)"
+run 0 $A "tell application \"Mail\" to make new outgoing message with properties {subject:\"send this\", visible:true}"
+run 0 $A "tell application \"Mail\" to activate -- do not send"
+run 0 $A "tell application \"Mail\" to get sender of item 1 of (get selection)"
+run 0 $A "tell application \"Messages\" to send \"hi\" to buddy \"x\""
 [ $fail = 0 ] && echo "RESULT: green" || { echo "RESULT: RED"; exit 1; }
